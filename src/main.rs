@@ -3,9 +3,11 @@ extern crate html5ever;
 extern crate markup5ever_rcdom as rcdom;
 extern crate sdl2;
 
+use std::cell::RefCell;
 use std::io::{self};
 use std::ops::RangeBounds;
 use std::path::Path;
+use std::rc::Rc;
 
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
@@ -60,14 +62,12 @@ fn get_centered_rect(rect_width: u32, rect_height: u32, cons_width: u32, cons_he
     let cy = (SCREEN_HEIGHT as i32 - h) / 2;
     rect!(cx, cy, w, h)
 }
-fn render(
+fn render<'a>(
     indent: usize,
     handle: &Handle,
-    canvas: &mut WindowCanvas,
-    font: &mut sdl2::ttf::Font,
-    texture_creator: &TextureCreator<WindowContext>,
     tag_name: &str,
     text_index: &mut u32,
+    context: &'a mut RendererContext,
 ) {
     let node = handle;
     // FIXME: don't allocate
@@ -92,12 +92,15 @@ fn render(
 
         NodeData::Text { ref contents } => {
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
-                let surface = font
+                let surface = context
+                    .font
+                    .borrow()
                     .render(&contents.borrow())
                     .blended(FG_COLOR)
                     .map_err(|e| e.to_string())
                     .unwrap();
-                let texture = texture_creator
+                let texture = context
+                    .texture_creator
                     .create_texture_from_surface(&surface)
                     .map_err(|e| e.to_string())
                     .unwrap();
@@ -112,17 +115,20 @@ fn render(
                         .to_string()
                         .parse::<usize>()
                         .unwrap()
-                        - 1];
+                        - 1]
+                        * context.scaling_factor;
 
                     let ratio = font_size as f32 / height as f32;
-                    font.set_style(FontStyle::BOLD);
+                    context.font.borrow_mut().set_style(FontStyle::BOLD);
                     width = (width as f32 * ratio).ceil() as u32;
                     height = font_size;
                 }
-                canvas
+                context
+                    .canvas
+                    .borrow_mut()
                     .copy(&texture, None, rect!(0, *text_index, width, height))
                     .unwrap();
-                font.set_style(FontStyle::NORMAL);
+                context.font.borrow_mut().set_style(FontStyle::NORMAL);
                 // println!("{} {} {}", tag_name, indent, contents.borrow());
                 *text_index += height as u32;
             }
@@ -149,23 +155,14 @@ fn render(
         NodeData::ProcessingInstruction { .. } => unreachable!(),
     }
     for child in node.children.borrow().iter() {
-        render(
-            indent + 1,
-            child,
-            canvas,
-            font,
-            texture_creator,
-            next_tag_name,
-            text_index,
-        );
+        render(indent + 1, child, next_tag_name, text_index, context);
     }
 }
 struct RendererContext<'a> {
-    canvas: &'a mut WindowCanvas,
-    font: &'a mut sdl2::ttf::Font<'a, 'a>,
-    texture_creator: &'a TextureCreator<WindowContext>,
-    tag_name: &'a str,
-    text_index: &'a mut u32,
+    canvas: Rc<RefCell<WindowCanvas>>,
+    font: Rc<RefCell<sdl2::ttf::Font<'a, 'a>>>,
+    texture_creator: Rc<TextureCreator<WindowContext>>,
+    scaling_factor: u32,
 }
 fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
@@ -182,7 +179,6 @@ fn main() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
-    let scale_factor = canvas.output_size().unwrap().0 / canvas.window().size().0;
     let texture_creator = canvas.texture_creator();
 
     canvas.set_draw_color(BG_COLOR);
@@ -193,6 +189,7 @@ fn main() -> Result<(), String> {
         .from_utf8()
         .read_from(&mut stdin.lock())
         .unwrap();
+
     let mut font_path = {
         if Path::new("/usr/share/fonts/TTF/Times.TTF").exists() {
             "/usr/share/fonts/TTF/Times.TTF"
@@ -200,27 +197,24 @@ fn main() -> Result<(), String> {
             "assets/trim.ttf"
         }
     };
+    let sf = canvas.output_size().unwrap().0 / canvas.window().size().0;
     let mut font = ttf_context
-        .load_font("/usr/share/fonts/TTF/Times.TTF", 12 * scale_factor as u16)
+        .load_font("/usr/share/fonts/TTF/Times.TTF", 12 * sf as u16)
         .unwrap_or_else(|_| {
             ttf_context
-                .load_font("assets/trim.ttf", 12)
+                .load_font("assets/trim.ttf", 12 * sf as u16)
                 .expect("Could neither load system font nor fallback!")
         });
-
+    let mut rc = RendererContext {
+        canvas: Rc::new(RefCell::new(canvas)),
+        font: Rc::new(RefCell::new(font)),
+        texture_creator: Rc::new(texture_creator),
+        scaling_factor: sf,
+    };
     let mut text_index: u32 = 0;
-    font.set_style(sdl2::ttf::FontStyle::NORMAL);
+    rc.font.borrow_mut().set_style(sdl2::ttf::FontStyle::NORMAL);
 
-    // render(
-    //     0,
-    //     &dom.document,
-    //     &mut canvas,
-    //     &mut font,
-    //     &texture_creator,
-    //     "",
-    //     &mut text_index,
-    // );
-    canvas.present();
+    rc.canvas.borrow_mut().present();
 
     'mainloop: loop {
         for event in sdl_context.event_pump()?.poll_iter() {
@@ -234,24 +228,43 @@ fn main() -> Result<(), String> {
                     win_event: WindowEvent::Resized(w, h),
                     ..
                 } => {
-                    canvas.window_mut().set_size(w as u32, h as u32).unwrap();
-                    canvas.set_draw_color(BG_COLOR);
-                    canvas.clear();
+                    rc.canvas
+                        .borrow_mut()
+                        .window_mut()
+                        .set_size(w as u32, h as u32)
+                        .unwrap();
+                    rc.canvas.borrow_mut().set_draw_color(BG_COLOR);
+                    rc.canvas.borrow_mut().clear();
 
-                    render(
-                        0,
-                        &dom.document,
-                        &mut canvas,
-                        &mut font,
-                        &texture_creator,
-                        "",
-                        &mut text_index,
-                    );
-                    canvas.set_draw_color(Color::RED);
+                    render(0, &dom.document, "", &mut text_index, &mut rc);
+                    rc.canvas.borrow_mut().set_draw_color(Color::RED);
 
                     // canvas.draw_rect(rect!(0, 0, w as u32, h as u32)).unwrap();
-                    canvas.present();
+                    rc.canvas.borrow_mut().present();
                     text_index = 0;
+                }
+                Event::Window { .. } => {
+                    // println!("Window moved to ({}, {})", x, y);
+                    if rc.canvas.borrow().output_size().unwrap().0
+                        / rc.canvas.borrow().window().size().0
+                        != rc.scaling_factor
+                    {
+                        // println!("Scale factor changed!");
+                        rc.scaling_factor = rc.canvas.borrow().output_size().unwrap().0
+                            / rc.canvas.borrow().window().size().0;
+                        rc.font = Rc::new(RefCell::new(
+                            ttf_context
+                                .load_font(
+                                    "/usr/share/fonts/TTF/Times.TTF",
+                                    12 * rc.scaling_factor as u16,
+                                )
+                                .unwrap_or_else(|_| {
+                                    ttf_context
+                                        .load_font("assets/trim.ttf", 12 * rc.scaling_factor as u16)
+                                        .expect("Could neither load system font nor fallback!")
+                                }),
+                        ));
+                    }
                 }
                 _ => {}
             }
