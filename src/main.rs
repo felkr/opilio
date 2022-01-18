@@ -8,16 +8,20 @@ use std::io::{self};
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::rc::Rc;
+use std::str::FromStr;
 
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
 
+use hyper::Uri;
 use rcdom::RcDom;
 use sdl2::event::{Event, WindowEvent};
+use sdl2::image::LoadSurface;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::{TextureCreator, WindowCanvas};
+use sdl2::surface::{self, Surface};
 use sdl2::ttf::{FontStyle, Sdl2TtfContext};
 use sdl2::video::WindowContext;
 
@@ -74,7 +78,9 @@ fn render<'a>(
     // print!("{}", repeat(" ").take(indent).collect::<String>());
     // Load a font
     let mut next_tag_name = "";
-    let invisible_tags = ["style", "script", "head", "title", "meta", "link"];
+    let invisible_tags = [
+        "style", "script", "head", "title", "meta", "link", "img", "br",
+    ];
     // render a surface, and convert it to a texture bound to the canvas
 
     match node.data {
@@ -91,6 +97,15 @@ fn render<'a>(
         }
 
         NodeData::Text { ref contents } => {
+            if tag_name == "title" {
+                context
+                    .canvas
+                    .borrow_mut()
+                    .window_mut()
+                    .set_title(&contents.borrow())
+                    .unwrap();
+            }
+
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
                 let surface = context
                     .font
@@ -146,6 +161,43 @@ fn render<'a>(
         } => {
             // print!("<{}", name.local);
             next_tag_name = &name.local;
+            if &name.local == "img" {
+                let img_path = attrs
+                    .borrow()
+                    .iter()
+                    .find(|a| &a.name.local == "src")
+                    .unwrap()
+                    .value
+                    .to_string();
+                // if img_path.starts_with("http://") || img_path.starts_with("https://") {
+                //     let client = hyper::Client::new();
+                //     let mut res = client.get(Uri::from_str(img_path.as_str()).unwrap());
+                //     // res.await;
+                // }
+                if let Ok(surface) = Surface::from_file(Path::new(&img_path)) {
+                    context.canvas.borrow_mut().set_draw_color(Color::RED);
+                    context
+                        .canvas
+                        .borrow_mut()
+                        .draw_rect(rect!(0, *text_index, surface.width(), surface.height()))
+                        .unwrap();
+                    context
+                        .canvas
+                        .borrow_mut()
+                        .copy(
+                            &context
+                                .texture_creator
+                                .create_texture_from_surface(&surface)
+                                .unwrap(),
+                            None,
+                            rect!(0, *text_index, surface.width(), surface.height()),
+                        )
+                        .unwrap();
+                    *text_index += surface.height();
+                } else {
+                    // println!("Couldn't load image: {}", img_path);
+                }
+            }
             for attr in attrs.borrow().iter() {
                 // print!(" {}=\"{}\"", attr.name.local, attr.value);
             }

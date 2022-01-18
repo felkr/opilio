@@ -339,6 +339,7 @@ dependencies = [
  "hyper",
  "markup5ever_rcdom",
  "sdl2",
+ "tokio",
 ]
 
 [[package]]
