@@ -7,11 +7,12 @@ use std::borrow::{self, Borrow};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use std::io::{self};
+use std::io::{self, BufRead, BufReader};
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::{env, fs};
 
 use async_recursion::async_recursion;
 use html5ever::parse_document;
@@ -275,10 +276,15 @@ async fn main() -> Result<(), String> {
     canvas.set_draw_color(BG_COLOR);
     canvas.clear();
 
-    let stdin = io::stdin();
+    let mut input: Box<dyn BufRead> = match env::args().nth(1) {
+        None => Box::new(BufReader::new(io::stdin())),
+        Some(filename) => Box::new(BufReader::new(
+            fs::File::open(filename).expect("Couldn't open file"),
+        )),
+    };
     let dom = parse_document(RcDom::default(), Default::default())
         .from_utf8()
-        .read_from(&mut stdin.lock())
+        .read_from(&mut input)
         .unwrap();
 
     let sf = canvas.output_size().unwrap().0 / canvas.window().size().0;
