@@ -37,6 +37,7 @@ use rcdom::{Handle, NodeData};
 
 static SCREEN_WIDTH: u32 = 800;
 static SCREEN_HEIGHT: u32 = 600;
+static SCROLL_SPEED: i32 = 12;
 static BG_COLOR: Color = Color::WHITE;
 static FG_COLOR: Color = Color::BLACK;
 
@@ -77,6 +78,7 @@ struct RendererContext<'a> {
     texture_creator: Rc<TextureCreator<WindowContext>>,
     scaling_factor: u32,
     images: HashMap<String, Vec<u8>>,
+    viewport: (i32, i32),
 }
 #[async_recursion(?Send)]
 async fn render<'a>(
@@ -139,11 +141,19 @@ async fn render<'a>(
                     .create_texture_from_surface(&surface)
                     .map_err(|e| e.to_string())
                     .unwrap();
-
                 context
                     .canvas
                     .borrow_mut()
-                    .copy(&texture, None, rect!(0, *text_index, width, height))
+                    .copy(
+                        &texture,
+                        None,
+                        rect!(
+                            0 + context.viewport.0,
+                            *text_index as i32 + context.viewport.1,
+                            width,
+                            height
+                        ),
+                    )
                     .unwrap();
                 context.font.borrow_mut().set_style(FontStyle::NORMAL);
                 *text_index += height as u32;
@@ -201,7 +211,16 @@ async fn render<'a>(
                 context
                     .canvas
                     .borrow_mut()
-                    .copy(&texture, None, rect!(0, *text_index, width, height))
+                    .copy(
+                        &texture,
+                        None,
+                        rect!(
+                            0 + context.viewport.0,
+                            *text_index as i32 + context.viewport.1,
+                            width,
+                            height
+                        ),
+                    )
                     .unwrap();
                 *text_index += height;
             }
@@ -259,6 +278,7 @@ async fn main() -> Result<(), String> {
         texture_creator: Rc::new(texture_creator),
         scaling_factor: sf,
         images: HashMap::new(),
+        viewport: (0, 0),
     };
     let mut text_index: u32 = 0;
     rc.font.borrow_mut().set_style(sdl2::ttf::FontStyle::NORMAL);
@@ -272,6 +292,17 @@ async fn main() -> Result<(), String> {
                     ..
                 }
                 | Event::Quit { .. } => break 'mainloop,
+                Event::MouseWheel { x, y, .. } => {
+                    rc.viewport.0 += x * SCROLL_SPEED;
+                    rc.viewport.1 += y * SCROLL_SPEED;
+                    if rc.viewport.1 > 0 {
+                        rc.viewport.1 = 0;
+                    }
+                    rc.canvas.borrow_mut().clear();
+                    render(0, &dom.document, "", &mut text_index, &mut rc).await;
+                    rc.canvas.borrow_mut().present();
+                    text_index = 0;
+                }
                 Event::Window { win_event, .. } => match win_event {
                     WindowEvent::Resized(w, h) => {
                         rc.canvas
@@ -283,7 +314,6 @@ async fn main() -> Result<(), String> {
                         rc.canvas.borrow_mut().clear();
 
                         render(0, &dom.document, "", &mut text_index, &mut rc).await;
-                        rc.canvas.borrow_mut().set_draw_color(Color::RED);
 
                         rc.canvas.borrow_mut().present();
                         text_index = 0;
