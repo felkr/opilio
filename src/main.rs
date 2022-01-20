@@ -22,6 +22,7 @@ use rcdom::RcDom;
 use sdl2::event::{Event, WindowEvent};
 use sdl2::image::{LoadSurface, LoadTexture};
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
 use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, TextureCreator, WindowCanvas};
@@ -79,6 +80,7 @@ struct RendererContext<'a> {
     scaling_factor: u32,
     images: HashMap<String, Vec<u8>>,
     viewport: (i32, i32),
+    hit_map: Vec<(i32, i32, u32, u32, fn())>,
 }
 #[async_recursion(?Send)]
 async fn render<'a>(
@@ -105,12 +107,17 @@ async fn render<'a>(
             }
 
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
+                let mut text_color = FG_COLOR;
                 let (mut width, mut height) = context
                     .font
                     .borrow_mut()
                     .size_of(&contents.borrow())
                     .unwrap();
                 let mut font_size = 12 * context.scaling_factor;
+                if tag_name == "a" {
+                    context.font.borrow_mut().set_style(FontStyle::UNDERLINE);
+                    text_color = Color::RGB(0, 0, 238);
+                }
                 if tag_name.starts_with("h") {
                     let font_sizes = [32, 24, 19, 16, 13, 11];
                     font_size = font_sizes[tag_name
@@ -132,7 +139,7 @@ async fn render<'a>(
                     .font
                     .borrow_mut()
                     .render(&contents.borrow())
-                    .blended(FG_COLOR)
+                    .blended(text_color)
                     .map_err(|e| e.to_string())
                     .unwrap();
 
@@ -141,6 +148,13 @@ async fn render<'a>(
                     .create_texture_from_surface(&surface)
                     .map_err(|e| e.to_string())
                     .unwrap();
+                context.hit_map.push((
+                    (0 + context.viewport.0),
+                    *text_index as i32 + context.viewport.1,
+                    width,
+                    height,
+                    || println!("Hello, I'm text"),
+                ));
                 context
                     .canvas
                     .borrow_mut()
@@ -208,6 +222,13 @@ async fn render<'a>(
                 } else {
                     println!("Couldn't load image: {}", img_path);
                 }
+                context.hit_map.push((
+                    0 + context.viewport.0,
+                    *text_index as i32 + context.viewport.1,
+                    width,
+                    height,
+                    || println!("Hello, I'm an image"),
+                ));
                 context
                     .canvas
                     .borrow_mut()
@@ -269,7 +290,7 @@ async fn main() -> Result<(), String> {
                     ttf_context
                         .load_font("assets/trim.ttf", 12 * sf as u16)
                         .expect("Could neither load system font nor fallback!")
-                });
+                })
         };
     }
     let mut rc = RendererContext {
@@ -279,9 +300,11 @@ async fn main() -> Result<(), String> {
         scaling_factor: sf,
         images: HashMap::new(),
         viewport: (0, 0),
+        hit_map: Vec::new(),
     };
     let mut text_index: u32 = 0;
     rc.font.borrow_mut().set_style(sdl2::ttf::FontStyle::NORMAL);
+
     rc.canvas.borrow_mut().present();
 
     'mainloop: loop {
@@ -299,9 +322,27 @@ async fn main() -> Result<(), String> {
                         rc.viewport.1 = 0;
                     }
                     rc.canvas.borrow_mut().clear();
+                    rc.hit_map.clear();
                     render(0, &dom.document, "", &mut text_index, &mut rc).await;
                     rc.canvas.borrow_mut().present();
                     text_index = 0;
+                }
+                Event::MouseButtonDown {
+                    mouse_btn: MouseButton::Left,
+                    x,
+                    y,
+                    ..
+                } => {
+                    for hit_rect in &rc.hit_map {
+                        // println!("{:?}", hit_rect);
+                        if hit_rect.0 <= x * rc.scaling_factor as i32
+                            && hit_rect.0 + hit_rect.2 as i32 >= x * rc.scaling_factor as i32
+                            && hit_rect.1 <= y * rc.scaling_factor as i32
+                            && hit_rect.1 + hit_rect.3 as i32 >= y * rc.scaling_factor as i32
+                        {
+                            hit_rect.4();
+                        }
+                    }
                 }
                 Event::Window { win_event, .. } => match win_event {
                     WindowEvent::Resized(w, h) => {
@@ -312,9 +353,14 @@ async fn main() -> Result<(), String> {
                             .unwrap();
                         rc.canvas.borrow_mut().set_draw_color(BG_COLOR);
                         rc.canvas.borrow_mut().clear();
-
+                        rc.hit_map.clear();
                         render(0, &dom.document, "", &mut text_index, &mut rc).await;
-
+                        for hit_rect in &rc.hit_map {
+                            rc.canvas.borrow_mut().set_draw_color(Color::RED);
+                            rc.canvas
+                                .borrow_mut()
+                                .draw_rect(rect!(hit_rect.0, hit_rect.1, hit_rect.2, hit_rect.3));
+                        }
                         rc.canvas.borrow_mut().present();
                         text_index = 0;
                     }
