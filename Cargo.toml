@@ -8,7 +8,16 @@ edition = "2018"
 html5ever = "0.25.1"
 markup5ever_rcdom = "0.1.0"
 hyper ={version="0.14.16", features=["full"]}
-tokio = "1.15.0"
+tokio = {version="1.15.0", features=[ "fs",
+    "macros",
+    "io-std",
+    "io-util",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "test-util",]}
+async-recursion = "1.0.0"
 
 [dependencies.sdl2]
 features = ["image", "gfx", "ttf"]

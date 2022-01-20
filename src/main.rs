@@ -3,22 +3,26 @@ extern crate html5ever;
 extern crate markup5ever_rcdom as rcdom;
 extern crate sdl2;
 
+use std::borrow::Borrow;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::{self};
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
 
+use async_recursion::async_recursion;
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
 
 use hyper::Uri;
-use rcdom::RcDom;
+use rcdom::{Node, RcDom};
 use sdl2::event::{Event, WindowEvent};
-use sdl2::image::LoadSurface;
+use sdl2::image::{LoadSurface, LoadTexture};
 use sdl2::keyboard::Keycode;
-use sdl2::pixels::Color;
+use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 use sdl2::render::{TextureCreator, WindowCanvas};
 use sdl2::surface::{self, Surface};
@@ -26,7 +30,7 @@ use sdl2::ttf::{FontStyle, Sdl2TtfContext};
 use sdl2::video::WindowContext;
 
 use std::default::Default;
-use std::iter::repeat;
+use std::iter::{repeat, Map};
 use std::string::String;
 
 use rcdom::{Handle, NodeData};
@@ -66,7 +70,15 @@ fn get_centered_rect(rect_width: u32, rect_height: u32, cons_width: u32, cons_he
     let cy = (SCREEN_HEIGHT as i32 - h) / 2;
     rect!(cx, cy, w, h)
 }
-fn render<'a>(
+struct RendererContext<'a> {
+    canvas: Rc<RefCell<WindowCanvas>>,
+    font: Rc<RefCell<sdl2::ttf::Font<'a, 'a>>>,
+    texture_creator: Rc<TextureCreator<WindowContext>>,
+    scaling_factor: u32,
+    images: HashMap<String, Vec<u8>>,
+}
+#[async_recursion(?Send)]
+async fn render<'a>(
     indent: usize,
     handle: &Handle,
     tag_name: &str,
@@ -109,11 +121,12 @@ fn render<'a>(
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
                 let surface = context
                     .font
-                    .borrow()
+                    .borrow_mut()
                     .render(&contents.borrow())
                     .blended(FG_COLOR)
                     .map_err(|e| e.to_string())
                     .unwrap();
+
                 let texture = context
                     .texture_creator
                     .create_texture_from_surface(&surface)
@@ -169,11 +182,34 @@ fn render<'a>(
                     .unwrap()
                     .value
                     .to_string();
-                // if img_path.starts_with("http://") || img_path.starts_with("https://") {
-                //     let client = hyper::Client::new();
-                //     let mut res = client.get(Uri::from_str(img_path.as_str()).unwrap());
-                //     // res.await;
-                // }
+                if img_path.starts_with("http://") || img_path.starts_with("https://") {
+                    if !context.images.contains_key(&img_path) {
+                        println!("Requesting {}...", img_path);
+                        let client = hyper::Client::new();
+                        let mut res = client
+                            .get(Uri::from_str(img_path.as_str()).unwrap())
+                            .await
+                            .unwrap();
+                        let bytes = hyper::body::to_bytes(res).await.unwrap().to_vec();
+                        context.images.insert(img_path.clone(), bytes);
+                    }
+
+                    let texture = context
+                        .texture_creator
+                        .load_texture_bytes(context.images.get(&img_path).unwrap())
+                        .unwrap();
+                    let query = texture.query();
+                    context
+                        .canvas
+                        .borrow_mut()
+                        .copy(
+                            &texture,
+                            None,
+                            rect!(0, *text_index, query.width, query.height),
+                        )
+                        .unwrap();
+                    *text_index += query.height;
+                }
                 if let Ok(surface) = Surface::from_file(Path::new(&img_path)) {
                     context.canvas.borrow_mut().set_draw_color(Color::RED);
                     context
@@ -207,16 +243,12 @@ fn render<'a>(
         NodeData::ProcessingInstruction { .. } => unreachable!(),
     }
     for child in node.children.borrow().iter() {
-        render(indent + 1, child, next_tag_name, text_index, context);
+        render(indent + 1, child, next_tag_name, text_index, context).await;
     }
 }
-struct RendererContext<'a> {
-    canvas: Rc<RefCell<WindowCanvas>>,
-    font: Rc<RefCell<sdl2::ttf::Font<'a, 'a>>>,
-    texture_creator: Rc<TextureCreator<WindowContext>>,
-    scaling_factor: u32,
-}
-fn main() -> Result<(), String> {
+
+#[tokio::main]
+async fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsys = sdl_context.video()?;
     let ttf_context = sdl2::ttf::init().map_err(|e| e.to_string())?;
@@ -262,10 +294,10 @@ fn main() -> Result<(), String> {
         font: Rc::new(RefCell::new(font)),
         texture_creator: Rc::new(texture_creator),
         scaling_factor: sf,
+        images: HashMap::new(),
     };
     let mut text_index: u32 = 0;
     rc.font.borrow_mut().set_style(sdl2::ttf::FontStyle::NORMAL);
-
     rc.canvas.borrow_mut().present();
 
     'mainloop: loop {
@@ -288,36 +320,36 @@ fn main() -> Result<(), String> {
                     rc.canvas.borrow_mut().set_draw_color(BG_COLOR);
                     rc.canvas.borrow_mut().clear();
 
-                    render(0, &dom.document, "", &mut text_index, &mut rc);
+                    render(0, &dom.document, "", &mut text_index, &mut rc).await;
                     rc.canvas.borrow_mut().set_draw_color(Color::RED);
 
                     // canvas.draw_rect(rect!(0, 0, w as u32, h as u32)).unwrap();
                     rc.canvas.borrow_mut().present();
                     text_index = 0;
                 }
-                Event::Window { .. } => {
-                    // println!("Window moved to ({}, {})", x, y);
-                    if rc.canvas.borrow().output_size().unwrap().0
-                        / rc.canvas.borrow().window().size().0
-                        != rc.scaling_factor
-                    {
-                        // println!("Scale factor changed!");
-                        rc.scaling_factor = rc.canvas.borrow().output_size().unwrap().0
-                            / rc.canvas.borrow().window().size().0;
-                        rc.font = Rc::new(RefCell::new(
-                            ttf_context
-                                .load_font(
-                                    "/usr/share/fonts/TTF/Times.TTF",
-                                    12 * rc.scaling_factor as u16,
-                                )
-                                .unwrap_or_else(|_| {
-                                    ttf_context
-                                        .load_font("assets/trim.ttf", 12 * rc.scaling_factor as u16)
-                                        .expect("Could neither load system font nor fallback!")
-                                }),
-                        ));
-                    }
-                }
+                // Event::Window { .. } => {
+                //     // println!("Window moved to ({}, {})", x, y);
+                //     if rc.canvas.borrow().output_size().unwrap().0
+                //         / rc.canvas.borrow().window().size().0
+                //         != rc.scaling_factor
+                //     {
+                //         // println!("Scale factor changed!");
+                //         rc.scaling_factor = rc.canvas.borrow().output_size().unwrap().0
+                //             / rc.canvas.borrow().window().size().0;
+                //         rc.font = Rc::new(RefCell::new(
+                //             ttf_context
+                //                 .load_font(
+                //                     "/usr/share/fonts/TTF/Times.TTF",
+                //                     12 * rc.scaling_factor as u16,
+                //                 )
+                //                 .unwrap_or_else(|_| {
+                //                     ttf_context
+                //                         .load_font("assets/trim.ttf", 12 * rc.scaling_factor as u16)
+                //                         .expect("Could neither load system font nor fallback!")
+                //                 }),
+                //         ));
+                //     }
+                // }
                 _ => {}
             }
         }
