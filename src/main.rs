@@ -3,43 +3,38 @@ extern crate html5ever;
 extern crate markup5ever_rcdom as rcdom;
 extern crate sdl2;
 
-use std::borrow::{self, Borrow};
+use crate::renderer::*;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use std::io::{self, BufRead, BufReader};
-use std::ops::RangeBounds;
-use std::path::Path;
+
 use std::rc::Rc;
-use std::str::FromStr;
+
 use std::{env, fs};
 
-use async_recursion::async_recursion;
 use html5ever::parse_document;
 use html5ever::tendril::TendrilSink;
 
-use hyper::Uri;
 use rcdom::RcDom;
 use sdl2::event::{Event, WindowEvent};
-use sdl2::image::{LoadSurface, LoadTexture};
+
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
-use sdl2::pixels::{Color, PixelFormatEnum};
+use sdl2::pixels::Color;
 use sdl2::rect::Rect;
-use sdl2::render::{Texture, TextureCreator, WindowCanvas};
-use sdl2::surface::Surface;
-use sdl2::ttf::FontStyle;
-use sdl2::video::WindowContext;
 
 use std::default::Default;
 
 use std::string::String;
 
-use rcdom::{Handle, NodeData};
+mod renderer;
 
 static SCREEN_WIDTH: u32 = 800;
 static SCREEN_HEIGHT: u32 = 600;
 static SCROLL_SPEED: i32 = 12;
+static DRAW_HITRECTS: bool = false;
 static BG_COLOR: Color = Color::WHITE;
 static FG_COLOR: Color = Color::BLACK;
 
@@ -72,187 +67,6 @@ fn get_centered_rect(rect_width: u32, rect_height: u32, cons_width: u32, cons_he
     let cx = (SCREEN_WIDTH as i32 - w) / 2;
     let cy = (SCREEN_HEIGHT as i32 - h) / 2;
     rect!(cx, cy, w, h)
-}
-#[derive(Clone)]
-struct RendererContext<'a> {
-    canvas: Rc<RefCell<WindowCanvas>>,
-    font: Rc<RefCell<sdl2::ttf::Font<'a, 'a>>>,
-    texture_creator: Rc<TextureCreator<WindowContext>>,
-    scaling_factor: u32,
-    images: HashMap<String, Vec<u8>>,
-    viewport: (i32, i32),
-    hit_map: Vec<(i32, i32, u32, u32, fn())>,
-}
-#[async_recursion(?Send)]
-async fn render<'a>(
-    indent: usize,
-    handle: &Handle,
-    tag_name: &str,
-    text_index: &mut u32,
-    context: &'a mut RendererContext,
-) {
-    let node = handle;
-    let mut next_tag_name = "";
-    let invisible_tags = [
-        "style", "script", "head", "title", "meta", "link", "img", "br",
-    ];
-    match node.data {
-        NodeData::Text { ref contents } => {
-            if tag_name == "title" {
-                context
-                    .canvas
-                    .borrow_mut()
-                    .window_mut()
-                    .set_title(&contents.borrow())
-                    .unwrap();
-            }
-
-            if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
-                let mut text_color = FG_COLOR;
-                let (mut width, mut height) = context
-                    .font
-                    .borrow_mut()
-                    .size_of(&contents.borrow())
-                    .unwrap();
-                let mut font_size = 12 * context.scaling_factor;
-                if tag_name == "a" {
-                    context.font.borrow_mut().set_style(FontStyle::UNDERLINE);
-                    text_color = Color::RGB(0, 0, 238);
-                }
-                if tag_name.starts_with("h") {
-                    let font_sizes = [32, 24, 19, 16, 13, 11];
-                    font_size = font_sizes[tag_name
-                        .chars()
-                        .nth(1)
-                        .unwrap_or('1')
-                        .to_string()
-                        .parse::<usize>()
-                        .unwrap()
-                        - 1]
-                        * context.scaling_factor;
-
-                    context.font.borrow_mut().set_style(FontStyle::BOLD);
-                }
-                let ratio = font_size as f32 / height as f32;
-                width = (width as f32 * ratio).ceil() as u32;
-                height = font_size;
-                let surface = context
-                    .font
-                    .borrow_mut()
-                    .render(&contents.borrow())
-                    .blended(text_color)
-                    .map_err(|e| e.to_string())
-                    .unwrap();
-
-                let texture = context
-                    .texture_creator
-                    .create_texture_from_surface(&surface)
-                    .map_err(|e| e.to_string())
-                    .unwrap();
-                context.hit_map.push((
-                    (0 + context.viewport.0),
-                    *text_index as i32 + context.viewport.1,
-                    width,
-                    height,
-                    || println!("Hello, I'm text"),
-                ));
-                context
-                    .canvas
-                    .borrow_mut()
-                    .copy(
-                        &texture,
-                        None,
-                        rect!(
-                            0 + context.viewport.0,
-                            *text_index as i32 + context.viewport.1,
-                            width,
-                            height
-                        ),
-                    )
-                    .unwrap();
-                context.font.borrow_mut().set_style(FontStyle::NORMAL);
-                *text_index += height as u32;
-            }
-        }
-        NodeData::Element {
-            ref name,
-            ref attrs,
-            ..
-        } => {
-            next_tag_name = &name.local;
-            if &name.local == "img" {
-                let img_path = attrs
-                    .borrow()
-                    .iter()
-                    .find(|a| &a.name.local == "src")
-                    .unwrap()
-                    .value
-                    .to_string();
-                let mut texture: Texture = context
-                    .texture_creator
-                    .create_texture_static(PixelFormatEnum::RGBA8888, 1, 1)
-                    .unwrap();
-                let (mut width, mut height) = (0, 0);
-                if img_path.starts_with("http://") || img_path.starts_with("https://") {
-                    if !context.images.contains_key(&img_path) {
-                        println!("Requesting {}...", img_path);
-                        let client = hyper::Client::new();
-                        let res = client
-                            .get(Uri::from_str(img_path.as_str()).unwrap())
-                            .await
-                            .unwrap();
-                        let bytes = hyper::body::to_bytes(res).await.unwrap().to_vec();
-                        context.images.insert(img_path.clone(), bytes);
-                    }
-
-                    texture = context
-                        .texture_creator
-                        .load_texture_bytes(context.images.get(&img_path).unwrap())
-                        .unwrap();
-                    let query = texture.query();
-                    width = query.width * context.scaling_factor;
-                    height = query.height * context.scaling_factor;
-                }
-                if let Ok(surface) = Surface::from_file(Path::new(&img_path)) {
-                    width = surface.width() * context.scaling_factor;
-                    height = surface.height() * context.scaling_factor;
-                    texture = context
-                        .texture_creator
-                        .create_texture_from_surface(&surface)
-                        .unwrap();
-                } else {
-                    println!("Couldn't load image: {}", img_path);
-                }
-                context.hit_map.push((
-                    0 + context.viewport.0,
-                    *text_index as i32 + context.viewport.1,
-                    width,
-                    height,
-                    || println!("Hello, I'm an image"),
-                ));
-                context
-                    .canvas
-                    .borrow_mut()
-                    .copy(
-                        &texture,
-                        None,
-                        rect!(
-                            0 + context.viewport.0,
-                            *text_index as i32 + context.viewport.1,
-                            width,
-                            height
-                        ),
-                    )
-                    .unwrap();
-                *text_index += height;
-            }
-        }
-        NodeData::ProcessingInstruction { .. } => unreachable!(),
-        _ => {}
-    }
-    for child in node.children.borrow().iter() {
-        render(indent + 1, child, next_tag_name, text_index, context).await;
-    }
 }
 
 #[tokio::main]
@@ -291,10 +105,10 @@ async fn main() -> Result<(), String> {
     macro_rules! load_font {
         () => {
             ttf_context
-                .load_font("/usr/share/fonts/TTF/Times.TTF", 12 * sf as u16)
+                .load_font("/usr/share/fonts/TTF/Times.TTF", 50 * sf as u16)
                 .unwrap_or_else(|_| {
                     ttf_context
-                        .load_font("assets/trim.ttf", 12 * sf as u16)
+                        .load_font("assets/trim.ttf", 50 * sf as u16)
                         .expect("Could neither load system font nor fallback!")
                 })
         };
@@ -308,7 +122,9 @@ async fn main() -> Result<(), String> {
         viewport: (0, 0),
         hit_map: Vec::new(),
     };
+
     let mut text_index: u32 = 0;
+
     rc.font.borrow_mut().set_style(sdl2::ttf::FontStyle::NORMAL);
 
     rc.canvas.borrow_mut().present();
@@ -361,11 +177,13 @@ async fn main() -> Result<(), String> {
                         rc.canvas.borrow_mut().clear();
                         rc.hit_map.clear();
                         render(0, &dom.document, "", &mut text_index, &mut rc).await;
-                        for hit_rect in &rc.hit_map {
-                            rc.canvas.borrow_mut().set_draw_color(Color::RED);
-                            rc.canvas
-                                .borrow_mut()
-                                .draw_rect(rect!(hit_rect.0, hit_rect.1, hit_rect.2, hit_rect.3));
+                        if DRAW_HITRECTS {
+                            for hit_rect in &rc.hit_map {
+                                rc.canvas.borrow_mut().set_draw_color(Color::RED);
+                                rc.canvas.borrow_mut().draw_rect(rect!(
+                                    hit_rect.0, hit_rect.1, hit_rect.2, hit_rect.3
+                                ))?;
+                            }
                         }
                         rc.canvas.borrow_mut().present();
                         text_index = 0;
@@ -381,6 +199,7 @@ async fn main() -> Result<(), String> {
                 _ => {}
             }
         }
+        sdl_context.timer()?.delay(1000 / 165);
     }
 
     Ok(())
