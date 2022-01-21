@@ -19,9 +19,12 @@
                     "kind": "bin"
                 }
             },
+            "env": {
+                "SDL_VIDEODRIVER": "wayland"
+            },
             "program": "${workspaceFolder}/target/debug/opilio",
             "args": [
-                "test.html"
+                "Motherfucking Website.html"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}"

@@ -16,6 +16,7 @@ use hyper::Uri;
 
 use sdl2::image::{LoadSurface, LoadTexture};
 
+use sdl2::libc::printf;
 use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, TextureCreator, WindowCanvas};
@@ -58,6 +59,7 @@ pub async fn render<'a>(
     ];
     match node.data {
         NodeData::Text { ref contents } => {
+            // println!("<>{}</>", contents.borrow());
             if tag_name == "title" {
                 context
                     .canvas
@@ -66,18 +68,21 @@ pub async fn render<'a>(
                     .set_title(&contents.borrow())
                     .unwrap();
             }
+            if tag_name == "br" {
+                *text_index += 12;
+            }
 
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
                 let mut overflow = String::new();
                 loop {
                     let mut text_color = FG_COLOR;
-                    let mut text = contents.borrow().to_string();
+                    let mut text = contents.borrow().to_string().replace("\n", "");
                     if overflow.len() > 0 {
                         text = overflow;
                         overflow = String::new();
                     }
                     let (mut width, mut height) = context.font.borrow_mut().size_of(&text).unwrap();
-                    let mut font_size = 12 * context.scaling_factor;
+                    let mut font_size = 16 * context.scaling_factor;
                     if tag_name == "a" {
                         context.font.borrow_mut().set_style(FontStyle::UNDERLINE);
                         text_color = Color::RGB(0, 0, 238);
@@ -100,15 +105,55 @@ pub async fn render<'a>(
                     let ratio = font_size as f32 / height as f32;
                     width = (width as f32 * ratio).ceil() as u32;
                     height = font_size;
-                    let mut c1 = text.len() as u32 * font_size;
+                    let mut c1 = 0;
                     let c2 =
-                        context.canvas.borrow_mut().window().size().0 * 2 * context.scaling_factor;
-                    while c1 > c2 {
-                        overflow.insert(0, text.pop().unwrap());
-                        width = context.font.borrow_mut().size_of(&text).unwrap().0;
-                        width = (width as f32 * ratio).ceil() as u32;
-                        c1 = text.len() as u32 * font_size;
+                        context.canvas.borrow_mut().window().size().0 * context.scaling_factor * 2;
+                    let mut fitting_text = String::new();
+                    for (i, word) in text.split_whitespace().enumerate() {
+                        fitting_text.push_str(word);
+                        fitting_text.push(' ');
+                        // println!("{} < {}", c1, c2);
+                        // println!("<{}>", fitting_text);
+                        c1 += font_size * word.len() as u32;
+                        if c1 > c2 {
+                            overflow = text
+                                .split_whitespace()
+                                .skip(i)
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            fitting_text.truncate(
+                                fitting_text.len()
+                                    - fitting_text.split_whitespace().last().unwrap().len()
+                                    - 1,
+                            );
+                            break;
+                        }
                     }
+                    text = fitting_text;
+                    width = context.font.borrow_mut().size_of(&text).unwrap().0;
+                    width = (width as f32 * ratio).ceil() as u32;
+                    // if text.contains("\n") {
+                    //     overflow = text.split("\n").last().unwrap().to_string();
+                    //     text.truncate(text.len() - overflow.len());
+                    // }
+                    // println!("==== START ====");
+                    // while c1 > c2 {
+                    //     // overflow.insert(0, text.pop().unwrap());
+                    //     // overflow.insert_str(
+                    //     //     0,
+                    //     //     &(text.split_whitespace().last().unwrap().to_owned() + &" ".to_owned()),
+                    //     // );
+                    //     overflow +=
+                    //         &(text.split_whitespace().last().unwrap().to_owned() + &" ".to_owned());
+                    //     println!("<{:?}>", overflow);
+                    //     if text.len() as i32 - overflow.len() as i32 > 1 {
+                    //         text.truncate(text.len() - overflow.len());
+                    //     }
+                    //     width = context.font.borrow_mut().size_of(&text).unwrap().0;
+                    //     width = (width as f32 * ratio).ceil() as u32;
+                    //     c1 = text.len() as u32 * font_size;
+                    // }
+                    // println!("==== END ====");
 
                     let surface = context
                         .font
@@ -145,7 +190,10 @@ pub async fn render<'a>(
                         )
                         .unwrap();
                     context.font.borrow_mut().set_style(FontStyle::NORMAL);
-                    *text_index += height as u32;
+                    if tag_name != "a" {
+                        *text_index += height as u32;
+                    }
+
                     if overflow.len() == 0 {
                         break;
                     }
@@ -158,6 +206,7 @@ pub async fn render<'a>(
             ..
         } => {
             next_tag_name = &name.local;
+
             if &name.local == "img" {
                 let img_path = attrs
                     .borrow()

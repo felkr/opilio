@@ -83,8 +83,8 @@ async fn main() -> Result<(), String> {
         .allow_highdpi()
         .build()
         .map_err(|e| e.to_string())?;
-
     let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+    canvas.window_mut().set_minimum_size(400, 400).unwrap();
     let texture_creator = canvas.texture_creator();
 
     canvas.set_draw_color(BG_COLOR);
