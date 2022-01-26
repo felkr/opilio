@@ -1,8 +1,8 @@
-use crate::FG_COLOR;
 use std::borrow::Borrow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use std::iter::repeat;
 use std::ops::RangeBounds;
 use std::path::Path;
 use std::rc::Rc;
@@ -27,6 +27,8 @@ use sdl2::video::WindowContext;
 use std::string::String;
 
 use rcdom::{Handle, NodeData};
+
+use crate::colorscheme::ColorScheme;
 // handle the annoying Rect i32
 macro_rules! rect(
     ($x:expr, $y:expr, $w:expr, $h:expr) => (
@@ -43,13 +45,14 @@ pub struct RendererContext<'a> {
     pub images: HashMap<String, Vec<u8>>,
     pub viewport: (i32, i32),
     pub hit_map: Vec<(i32, i32, u32, u32, fn())>,
+    pub color_scheme: ColorScheme,
+    pub indices: (u32, u32),
 }
 #[async_recursion(?Send)]
 pub async fn render<'a>(
     indent: usize,
     handle: &Handle,
     tag_name: &str,
-    text_index: &mut u32,
     context: &'a mut RendererContext,
 ) {
     let node = handle;
@@ -69,13 +72,13 @@ pub async fn render<'a>(
                     .unwrap();
             }
             if tag_name == "br" {
-                *text_index += 12;
+                context.indices.1 += 12;
             }
 
             if &contents.borrow().trim().len() != &0 && !invisible_tags.contains(&tag_name) {
                 let mut overflow = String::new();
                 loop {
-                    let mut text_color = FG_COLOR;
+                    let mut text_color = context.color_scheme.text;
                     let mut text = contents.borrow().to_string().replace("\n", "");
                     if overflow.len() > 0 {
                         text = overflow;
@@ -85,7 +88,7 @@ pub async fn render<'a>(
                     let mut font_size = 16 * context.scaling_factor;
                     if tag_name == "a" {
                         context.font.borrow_mut().set_style(FontStyle::UNDERLINE);
-                        text_color = Color::RGB(0, 0, 238);
+                        text_color = context.color_scheme.link;
                     }
                     if tag_name.starts_with("h") {
                         let font_sizes = [32, 24, 19, 16, 13, 11];
@@ -169,12 +172,14 @@ pub async fn render<'a>(
                         .unwrap();
 
                     context.hit_map.push((
-                        (0 + context.viewport.0),
-                        *text_index as i32 + context.viewport.1,
+                        (context.indices.0 as i32 + context.viewport.0),
+                        context.indices.1 as i32 + context.viewport.1,
                         width,
                         height,
                         || println!("Hello, I'm text"),
                     ));
+                    context.indices.0 = indent as u32 * 12;
+
                     context
                         .canvas
                         .borrow_mut()
@@ -182,18 +187,16 @@ pub async fn render<'a>(
                             &texture,
                             None,
                             rect!(
-                                0 + context.viewport.0,
-                                *text_index as i32 + context.viewport.1,
+                                context.indices.0 as i32 + context.viewport.0,
+                                context.indices.1 as i32 + context.viewport.1,
                                 width,
                                 height
                             ),
                         )
                         .unwrap();
                     context.font.borrow_mut().set_style(FontStyle::NORMAL);
-                    if tag_name != "a" {
-                        *text_index += height as u32;
-                    }
-
+                    context.indices.1 += height as u32;
+                    // println!("#text");
                     if overflow.len() == 0 {
                         break;
                     }
@@ -205,6 +208,8 @@ pub async fn render<'a>(
             ref attrs,
             ..
         } => {
+            // println!("{}", &name.local);
+
             next_tag_name = &name.local;
 
             if &name.local == "img" {
@@ -251,8 +256,8 @@ pub async fn render<'a>(
                     println!("Couldn't load image: {}", img_path);
                 }
                 context.hit_map.push((
-                    0 + context.viewport.0,
-                    *text_index as i32 + context.viewport.1,
+                    context.indices.0 as i32 + context.viewport.0,
+                    context.indices.1 as i32 + context.viewport.1,
                     width,
                     height,
                     || println!("Hello, I'm an image"),
@@ -264,20 +269,61 @@ pub async fn render<'a>(
                         &texture,
                         None,
                         rect!(
-                            0 + context.viewport.0,
-                            *text_index as i32 + context.viewport.1,
+                            context.indices.0 as i32 + context.viewport.0,
+                            context.indices.1 as i32 + context.viewport.1,
                             width,
                             height
                         ),
                     )
                     .unwrap();
-                *text_index += height;
+                context.indices.1 += height;
             }
         }
         NodeData::ProcessingInstruction { .. } => unreachable!(),
         _ => {}
     }
     for child in node.children.borrow().iter() {
-        render(indent + 1, child, next_tag_name, text_index, context).await;
+        render(indent + 1, child, next_tag_name, context).await;
+    }
+}
+
+pub fn print_dom(indent: usize, handle: &Handle) {
+    let node = handle;
+    // FIXME: don't allocate
+    print!("{}", repeat(" ").take(indent).collect::<String>());
+    match node.data {
+        NodeData::Document => println!("#Document"),
+
+        NodeData::Doctype {
+            ref name,
+            ref public_id,
+            ref system_id,
+        } => println!("<!DOCTYPE {} \"{}\" \"{}\">", name, public_id, system_id),
+
+        NodeData::Text { ref contents } => {
+            println!("#text: {}", contents.borrow().escape_default())
+        }
+
+        NodeData::Comment { ref contents } => println!("<!-- {} -->", contents.escape_default()),
+
+        NodeData::Element {
+            ref name,
+            ref attrs,
+            ..
+        } => {
+            assert!(name.ns == ns!(html));
+            print!("<{}", name.local);
+            for attr in attrs.borrow().iter() {
+                assert!(attr.name.ns == ns!());
+                print!(" {}=\"{}\"", attr.name.local, attr.value);
+            }
+            println!(">");
+        }
+
+        NodeData::ProcessingInstruction { .. } => unreachable!(),
+    }
+
+    for child in node.children.borrow().iter() {
+        print_dom(indent + 4, child);
     }
 }
